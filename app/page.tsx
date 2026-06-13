@@ -1,7 +1,6 @@
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-import OpenAI from "openai";
 import { revalidatePath } from "next/cache";
 import { prisma } from "./lib/prisma";
 import {
@@ -9,13 +8,40 @@ import {
   daysPassedInFinanceWeek,
   daysRemainingInFinanceWeek,
   endOfFinanceWeek,
+  endOfMonth,
   inputDate,
   money,
   startOfFinanceWeek,
   startOfMonth,
-  endOfMonth,
 } from "./lib/finance";
 import { buttonClass, Card, inputClass, Panel, Shell } from "@/components/ui";
+
+function getNextFuturePaymentDate(originalDate: Date, frequency: string, now: Date) {
+  const next = new Date(originalDate);
+
+  while (next < now) {
+    if (frequency === "WEEKLY") {
+      next.setDate(next.getDate() + 7);
+    } else if (frequency === "FORTNIGHTLY") {
+      next.setDate(next.getDate() + 14);
+    } else if (frequency === "MONTHLY") {
+      next.setMonth(next.getMonth() + 1);
+    } else if (frequency === "YEARLY") {
+      next.setFullYear(next.getFullYear() + 1);
+    } else {
+      break;
+    }
+  }
+
+  return next;
+}
+
+function monthlyEquivalent(amount: number, frequency: string) {
+  if (frequency === "WEEKLY") return amount * 4.33;
+  if (frequency === "FORTNIGHTLY") return amount * 2.17;
+  if (frequency === "YEARLY") return amount / 12;
+  return amount;
+}
 
 async function addTransaction(formData: FormData) {
   "use server";
@@ -53,109 +79,45 @@ async function deleteTransaction(formData: FormData) {
   revalidatePath("/");
 }
 
-async function generateCashFlowInsight(data: {
-  healthScore: number;
-  forecastWeeklyIncome: number;
-  actualWeeklyIncome: number;
-  weeklyExpenses: number;
-  monthlyExpenses: number;
-  weeklyBalance: number;
-  weeklyBudget: number;
-  projectedWeeklySpend: number;
-  forecastOver: number;
-  freeCashAfterBills: number;
-  safeDailySpend: number;
-  dueNext7: number;
-  dueNext30: number;
-  fixedMonthlyBurn: number;
-}) {
-  if (!process.env.OPENAI_API_KEY) {
-    return `OpenAI is not connected yet.
+function subscriptionMatchesCategory(subscriptionName: string, categoryName: string) {
+  const sub = subscriptionName.toLowerCase();
+  const cat = categoryName.toLowerCase();
 
-Add OPENAI_API_KEY to your .env file.
+  if (sub.includes(cat)) return true;
 
-Until then:
-Your safe daily spend is ${money(data.safeDailySpend)}.
-Your free cash after bills is ${money(data.freeCashAfterBills)}.
-Do not spend emotionally today. Wait 24 hours before buying anything non-essential.`;
+  if (
+    cat.includes("fitness") &&
+    (sub.includes("gym") ||
+      sub.includes("fitness") ||
+      sub.includes("snap") ||
+      sub.includes("anytime") ||
+      sub.includes("jetts") ||
+      sub.includes("revo"))
+  ) {
+    return true;
   }
 
-  try {
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-
-    const response = await openai.responses.create({
-      model: process.env.OPENAI_MODEL || "gpt-5.5-mini",
-      input: `
-You are the AI Cash Flow Commander inside a finance app.
-
-The user says they are a bit of a compulsive spender.
-Your job is to protect them from emotional spending and help them make calm money decisions.
-
-Important:
-- Do not diagnose.
-- Do not shame.
-- Be direct, firm, practical, and supportive.
-- Use Australian dollars.
-- Give exact actions for today.
-- Keep it short but powerful.
-- Speak like a premium finance coach.
-- Focus on spending control, bills, cashflow, risk, and today's limit.
-
-Data:
-Health score: ${data.healthScore}/100
-Forecast weekly income: $${data.forecastWeeklyIncome.toFixed(2)}
-Actual weekly income: $${data.actualWeeklyIncome.toFixed(2)}
-Weekly expenses: $${data.weeklyExpenses.toFixed(2)}
-Monthly expenses: $${data.monthlyExpenses.toFixed(2)}
-Weekly balance: $${data.weeklyBalance.toFixed(2)}
-Weekly budget: $${data.weeklyBudget.toFixed(2)}
-Projected weekly spend: $${data.projectedWeeklySpend.toFixed(2)}
-Forecast over/under budget: $${data.forecastOver.toFixed(2)}
-Free cash after bills: $${data.freeCashAfterBills.toFixed(2)}
-Safe daily spend: $${data.safeDailySpend.toFixed(2)}
-Due next 7 days: $${data.dueNext7.toFixed(2)}
-Due next 30 days: $${data.dueNext30.toFixed(2)}
-Fixed monthly burn: $${data.fixedMonthlyBurn.toFixed(2)}
-
-Return exactly this format:
-
-COMMAND STATUS:
-...
-
-SPENDING RISK:
-...
-
-TODAY'S RULE:
-...
-
-DO NOT BUY LIST:
-...
-
-MONEY MOVE NOW:
-...
-
-FINAL WARNING:
-...
-`,
-    });
-
-    return response.output_text || "AI insight could not be generated.";
-  } catch (error) {
-    console.error(error);
-
-    return `AI insight temporarily unavailable.
-
-Check:
-1. OPENAI_API_KEY exists in .env
-2. You restarted npm run dev
-3. Your OpenAI account has API credit
-
-For now: keep today's non-essential spending under ${money(
-      data.safeDailySpend
-    )} and use a 24-hour delay before buying anything emotional.`;
+  if (
+    cat.includes("groceries") &&
+    (sub.includes("woolworths") ||
+      sub.includes("coles") ||
+      sub.includes("aldi") ||
+      sub.includes("grocery"))
+  ) {
+    return true;
   }
+
+  if (
+    cat.includes("transport") &&
+    (sub.includes("fuel") ||
+      sub.includes("uber") ||
+      sub.includes("parking") ||
+      sub.includes("car"))
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 export default async function DashboardPage() {
@@ -171,7 +133,7 @@ export default async function DashboardPage() {
     transactions,
     weeklyTransactions,
     monthlyTransactions,
-    subscriptions,
+    rawSubscriptions,
     incomeForecast,
     incomeLogs,
     budgets,
@@ -186,21 +148,13 @@ export default async function DashboardPage() {
     }),
 
     prisma.transaction.findMany({
-      where: {
-        date: {
-          gte: weekStart,
-          lte: weekEnd,
-        },
-      },
+      where: { date: { gte: weekStart, lte: weekEnd } },
+      include: { category: true },
     }),
 
     prisma.transaction.findMany({
-      where: {
-        date: {
-          gte: monthStart,
-          lte: monthEnd,
-        },
-      },
+      where: { date: { gte: monthStart, lte: monthEnd } },
+      include: { category: true },
     }),
 
     prisma.subscription.findMany({
@@ -212,12 +166,7 @@ export default async function DashboardPage() {
     }),
 
     prisma.incomeLog.findMany({
-      where: {
-        date: {
-          gte: weekStart,
-          lte: weekEnd,
-        },
-      },
+      where: { date: { gte: weekStart, lte: weekEnd } },
     }),
 
     prisma.budget.findMany({
@@ -230,10 +179,21 @@ export default async function DashboardPage() {
     }),
   ]);
 
-  const actualWeeklyIncome = incomeLogs.reduce(
-    (sum, log) => sum + log.amount,
-    0
-  );
+  const subscriptions = rawSubscriptions
+    .map((subscription) => ({
+      ...subscription,
+      upcomingDate: getNextFuturePaymentDate(
+        subscription.nextPaymentDate,
+        subscription.frequency,
+        now
+      ),
+      monthlyAmount: monthlyEquivalent(subscription.amount, subscription.frequency),
+    }))
+    .sort((a, b) => a.upcomingDate.getTime() - b.upcomingDate.getTime());
+
+  const activeSubs = subscriptions.filter((subscription) => subscription.active);
+
+  const actualWeeklyIncome = incomeLogs.reduce((sum, log) => sum + log.amount, 0);
 
   const forecastWeeklyIncome =
     incomeForecast?.weeklyAmount && incomeForecast.weeklyAmount > 0
@@ -246,14 +206,12 @@ export default async function DashboardPage() {
     .filter((transaction) => transaction.type === "EXPENSE")
     .reduce((sum, transaction) => sum + transaction.amount, 0);
 
-  const monthlyExpenses = monthlyTransactions
+  const monthlyTransactionExpenses = monthlyTransactions
     .filter((transaction) => transaction.type === "EXPENSE")
     .reduce((sum, transaction) => sum + transaction.amount, 0);
 
-  const activeSubs = subscriptions.filter((subscription) => subscription.active);
-
   const fixedMonthlyBurn = activeSubs.reduce(
-    (sum, subscription) => sum + subscription.amount,
+    (sum, subscription) => sum + subscription.monthlyAmount,
     0
   );
 
@@ -266,23 +224,21 @@ export default async function DashboardPage() {
   const dueNext7 = activeSubs
     .filter(
       (subscription) =>
-        subscription.nextPaymentDate >= now &&
-        subscription.nextPaymentDate <= next7
+        subscription.upcomingDate >= now && subscription.upcomingDate <= next7
     )
     .reduce((sum, subscription) => sum + subscription.amount, 0);
 
   const dueNext30 = activeSubs
     .filter(
       (subscription) =>
-        subscription.nextPaymentDate >= now &&
-        subscription.nextPaymentDate <= next30
+        subscription.upcomingDate >= now && subscription.upcomingDate <= next30
     )
     .reduce((sum, subscription) => sum + subscription.amount, 0);
 
   const weeklyBalance = actualWeeklyIncome - weeklyExpenses;
 
   const freeCashAfterBills =
-    forecastMonthlyIncome - monthlyExpenses - fixedMonthlyBurn;
+    forecastMonthlyIncome - monthlyTransactionExpenses - fixedMonthlyBurn;
 
   const safeDailySpend =
     Math.max(0, forecastWeeklyIncome - weeklyExpenses - dueNext7) /
@@ -312,22 +268,115 @@ export default async function DashboardPage() {
     )
   );
 
-  const aiInsight = await generateCashFlowInsight({
-    healthScore,
-    forecastWeeklyIncome,
-    actualWeeklyIncome,
-    weeklyExpenses,
-    monthlyExpenses,
-    weeklyBalance,
-    weeklyBudget,
-    projectedWeeklySpend,
-    forecastOver,
-    freeCashAfterBills,
-    safeDailySpend,
-    dueNext7,
-    dueNext30,
-    fixedMonthlyBurn,
-  });
+  const spendRate =
+    forecastWeeklyIncome > 0 ? weeklyExpenses / forecastWeeklyIncome : 0;
+
+  const burnRateMonthly =
+    forecastMonthlyIncome > 0
+      ? ((monthlyTransactionExpenses + fixedMonthlyBurn) / forecastMonthlyIncome) *
+        100
+      : 0;
+
+  const recommendedDailySpend = Math.max(0, freeCashAfterBills * 0.35) / 30;
+  const impulseLockAmount = Math.max(20, recommendedDailySpend * 0.5);
+
+  const riskLevel =
+    healthScore < 50
+      ? "High Risk"
+      : healthScore < 75
+      ? "Controlled Risk"
+      : "Strong Position";
+
+  const riskTone =
+    healthScore < 50 ? "danger" : healthScore < 75 ? "warning" : "success";
+
+  const categoryChartData = categories
+    .map((category) => {
+      const matchingBudget = budgets.find(
+        (budget) => budget.categoryId === category.id
+      );
+
+      const weeklyLimit = matchingBudget?.weeklyLimit || category.weeklyLimit || 0;
+
+      const monthlyLimit =
+        matchingBudget?.monthlyLimit ||
+        category.monthlyLimit ||
+        weeklyLimit * 4.33;
+
+      const transactionSpent = monthlyTransactions
+        .filter(
+          (transaction) =>
+            transaction.type === "EXPENSE" &&
+            transaction.categoryId === category.id
+        )
+        .reduce((sum, transaction) => sum + transaction.amount, 0);
+
+      const subscriptionSpent = activeSubs
+        .filter((subscription) =>
+          subscriptionMatchesCategory(subscription.name, category.name)
+        )
+        .reduce((sum, subscription) => sum + subscription.monthlyAmount, 0);
+
+      const spent = transactionSpent + subscriptionSpent;
+
+      const percentUsed =
+        monthlyLimit > 0 ? Math.min(100, (spent / monthlyLimit) * 100) : 0;
+
+      return {
+        id: category.id,
+        name: category.name,
+        weeklyLimit,
+        monthlyLimit,
+        transactionSpent,
+        subscriptionSpent,
+        spent,
+        remaining: monthlyLimit - spent,
+        percentUsed,
+      };
+    })
+    .filter((category) => category.monthlyLimit > 0 || category.spent > 0)
+    .sort((a, b) => b.spent - a.spent);
+
+  const topCategory = categoryChartData[0];
+
+  const subscriptionPieData = activeSubs
+    .map((subscription) => ({
+      id: subscription.id,
+      name: subscription.name,
+      amount: subscription.monthlyAmount,
+      actualAmount: subscription.amount,
+      frequency: subscription.frequency,
+      upcomingDate: subscription.upcomingDate,
+    }))
+    .sort((a, b) => b.amount - a.amount);
+
+  const subscriptionColors = [
+    "#10b981",
+    "#3b82f6",
+    "#f59e0b",
+    "#ef4444",
+    "#8b5cf6",
+    "#06b6d4",
+    "#84cc16",
+    "#ec4899",
+  ];
+
+  let runningTotal = 0;
+
+  const subscriptionPieGradient =
+    fixedMonthlyBurn > 0
+      ? subscriptionPieData
+          .map((subscription, index) => {
+            const start = (runningTotal / fixedMonthlyBurn) * 100;
+            runningTotal += subscription.amount;
+            const end = (runningTotal / fixedMonthlyBurn) * 100;
+
+            return `${
+              subscriptionColors[index % subscriptionColors.length]
+            } ${start}% ${end}%`;
+          })
+          .join(", ")
+      : "#e5e7eb 0% 100%";
 
   return (
     <Shell
@@ -337,71 +386,241 @@ export default async function DashboardPage() {
       )}`}
     >
       <section className="grid grid-cols-1 md:grid-cols-4 gap-5">
-        <Card
-          title="Health Score"
-          value={`${healthScore}/100`}
-          note="Cash-flow risk score"
-          tone={
-            healthScore < 60
-              ? "danger"
-              : healthScore < 80
-              ? "warning"
-              : "success"
-          }
-        />
-
-        <Card
-          title="Forecast Weekly Income"
-          value={money(forecastWeeklyIncome)}
-          note={
-            incomeForecast?.weeklyAmount && incomeForecast.weeklyAmount > 0
-              ? "Planning income"
-              : "Using actual income this week"
-          }
-        />
-
-        <Card
-          title="Actual Income This Week"
-          value={money(actualWeeklyIncome)}
-          note="Logged income"
-          tone="success"
-        />
-
-        <Card
-          title="Weekly Balance"
-          value={money(weeklyBalance)}
-          note="Actual income - weekly expenses"
-          tone={weeklyBalance < 0 ? "danger" : "normal"}
-        />
-
-        <Card
-          title="Safe Daily Spend"
-          value={money(safeDailySpend)}
-          note="Hard daily spending ceiling"
-          tone={safeDailySpend <= 0 ? "danger" : "success"}
-        />
-
-        <Card
-          title="Due Next 7 Days"
-          value={money(dueNext7)}
-          note="Future active subscriptions only"
-          tone={dueNext7 > weeklyBalance ? "danger" : "normal"}
-        />
-
-        <Card
-          title="Due Next 30 Days"
-          value={money(dueNext30)}
-          note="Cash pressure"
-          tone="warning"
-        />
-
-        <Card
-          title="Free Cash After Bills"
-          value={money(freeCashAfterBills)}
-          note="Monthly estimate - spending - bills"
-          tone={freeCashAfterBills < 0 ? "danger" : "success"}
-        />
+        <Card title="Health Score" value={`${healthScore}/100`} note="Cash-flow risk score" tone={riskTone} />
+        <Card title="Forecast Weekly Income" value={money(forecastWeeklyIncome)} note={incomeForecast?.weeklyAmount ? "Planning income" : "Using actual income this week"} />
+        <Card title="Actual Income This Week" value={money(actualWeeklyIncome)} note="Logged income" tone="success" />
+        <Card title="Weekly Balance" value={money(weeklyBalance)} note="Actual income - weekly expenses" tone={weeklyBalance < 0 ? "danger" : "normal"} />
+        <Card title="Safe Daily Spend" value={money(safeDailySpend)} note="Weekly cash-flow ceiling" tone={safeDailySpend <= 0 ? "danger" : "success"} />
+        <Card title="Due Next 7 Days" value={money(dueNext7)} note="Rolled-forward active subscriptions" tone={dueNext7 > weeklyBalance ? "danger" : "normal"} />
+        <Card title="Due Next 30 Days" value={money(dueNext30)} note="Rolled-forward upcoming bills" tone="warning" />
+        <Card title="Free Cash After Bills" value={money(freeCashAfterBills)} note="Monthly estimate - spending - bills" tone={freeCashAfterBills < 0 ? "danger" : "success"} />
       </section>
+
+      <Panel title="Money Control Centre">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          <div className="rounded-3xl bg-black text-white p-6 border border-emerald-500/30">
+            <p className="text-xs tracking-[0.35em] text-emerald-400 font-black uppercase">
+              Command Status
+            </p>
+            <h3 className="text-3xl font-black mt-3">{riskLevel}</h3>
+            <p className="text-white/60 mt-3 leading-7">
+              Your status is based on income, spending speed, bills due, budget
+              pressure, and remaining cash flow.
+            </p>
+
+            <div className="mt-6 rounded-2xl bg-white/10 p-4">
+              <p className="text-white/50 text-sm font-bold">Monthly burn rate</p>
+              <p className="text-3xl font-black mt-1">
+                {burnRateMonthly.toFixed(1)}%
+              </p>
+              <p className="text-white/50 text-sm mt-1">
+                Expenses plus fixed bills versus income.
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-3xl bg-black/5 p-6">
+            <p className="text-xs tracking-[0.35em] text-black/40 font-black uppercase">
+              Spending Guardrail
+            </p>
+            <h3 className="text-3xl font-black mt-3">
+              {money(recommendedDailySpend)}
+            </h3>
+            <p className="text-black/50 mt-2">
+              Recommended daily lifestyle spend after protecting bills and cash flow.
+            </p>
+
+            <div className="mt-6 space-y-3 text-black/70">
+              <p><b>Impulse lock:</b> Anything above {money(impulseLockAmount)} waits 24 hours.</p>
+              <p><b>Hard ceiling:</b> Do not exceed {money(safeDailySpend)} today.</p>
+              <p><b>Focus:</b> food, fuel, bills, and business growth only.</p>
+            </div>
+          </div>
+
+          <div className="rounded-3xl bg-black/5 p-6">
+            <p className="text-xs tracking-[0.35em] text-black/40 font-black uppercase">
+              Behaviour Signal
+            </p>
+            <h3 className="text-3xl font-black mt-3">
+              {(spendRate * 100).toFixed(1)}%
+            </h3>
+            <p className="text-black/50 mt-2">
+              Of weekly income already spent this finance week.
+            </p>
+
+            <div className="mt-6 space-y-3 text-black/70">
+              <p>
+                <b>Top category:</b>{" "}
+                {topCategory && topCategory.spent > 0
+                  ? `${topCategory.name} — ${money(topCategory.spent)}`
+                  : "No major category yet"}
+              </p>
+              <p>
+                <b>Forecast:</b>{" "}
+                {forecastOver > 0
+                  ? `${money(forecastOver)} over weekly budget`
+                  : `${money(Math.abs(forecastOver))} under weekly budget`}
+              </p>
+              <p><b>Rule:</b> Log before spending, not after.</p>
+            </div>
+          </div>
+        </div>
+      </Panel>
+
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Panel title="Subscription Breakdown">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+            <div className="flex justify-center">
+              <div
+                className="w-72 h-72 rounded-full relative shadow-inner"
+                style={{ background: `conic-gradient(${subscriptionPieGradient})` }}
+              >
+                <div className="absolute inset-10 bg-white rounded-full flex flex-col items-center justify-center text-center">
+                  <p className="text-xs tracking-[0.25em] text-black/40 font-black uppercase">
+                    Monthly Subs
+                  </p>
+                  <p className="text-3xl font-black mt-2">
+                    {money(fixedMonthlyBurn)}
+                  </p>
+                  <p className="text-sm text-black/50 mt-1">
+                    {activeSubs.length} active
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {subscriptionPieData.map((subscription, index) => {
+                const percentage =
+                  fixedMonthlyBurn > 0
+                    ? (subscription.amount / fixedMonthlyBurn) * 100
+                    : 0;
+
+                return (
+                  <div key={subscription.id} className="flex items-center justify-between rounded-2xl bg-black/5 p-4">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="h-4 w-4 rounded-full"
+                        style={{
+                          backgroundColor:
+                            subscriptionColors[index % subscriptionColors.length],
+                        }}
+                      />
+                      <div>
+                        <p className="font-black">{subscription.name}</p>
+                        <p className="text-sm text-black/50">
+                          Next payment {auDate(subscription.upcomingDate)}
+                        </p>
+                        <p className="text-xs text-black/40">
+                          {money(subscription.actualAmount)} {subscription.frequency.toLowerCase()}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <p className="font-black">{money(subscription.amount)}</p>
+                      <p className="text-sm text-black/50">
+                        {percentage.toFixed(1)}%
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {subscriptionPieData.length === 0 && (
+                <p className="text-black/50">No active subscriptions yet.</p>
+              )}
+            </div>
+          </div>
+        </Panel>
+
+        <Panel title="Subscription Pressure">
+          <div className="grid grid-cols-1 gap-4">
+            <Card
+              title="Total Active Subscriptions"
+              value={money(fixedMonthlyBurn)}
+              note="Monthly recurring burn"
+              tone={
+                fixedMonthlyBurn > forecastMonthlyIncome * 0.25
+                  ? "danger"
+                  : "success"
+              }
+            />
+
+            <Card
+              title="Income Used by Subscriptions"
+              value={
+                forecastMonthlyIncome > 0
+                  ? `${((fixedMonthlyBurn / forecastMonthlyIncome) * 100).toFixed(1)}%`
+                  : "0.0%"
+              }
+              note="Recurring subscriptions vs monthly income"
+              tone={
+                fixedMonthlyBurn > forecastMonthlyIncome * 0.25
+                  ? "danger"
+                  : "normal"
+              }
+            />
+
+            <Card
+              title="Next 30 Days"
+              value={money(dueNext30)}
+              note="Subscriptions due soon"
+              tone="warning"
+            />
+          </div>
+        </Panel>
+      </section>
+
+      <Panel title="Budget vs Spent by Category">
+        <div className="space-y-5">
+          {categoryChartData.map((category) => (
+            <div key={category.id} className="rounded-3xl bg-black/5 p-5">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-black text-lg">{category.name}</p>
+                  <p className="text-sm text-black/50">
+                    Monthly budget {money(category.monthlyLimit)} • Spent{" "}
+                    {money(category.spent)}
+                  </p>
+                  <p className="text-xs text-black/40 mt-1">
+                    Transactions {money(category.transactionSpent)} • Subscriptions{" "}
+                    {money(category.subscriptionSpent)}
+                  </p>
+                </div>
+
+                <div className="text-right">
+                  <p className={`text-xl font-black ${category.remaining < 0 ? "text-red-600" : "text-emerald-600"}`}>
+                    {category.remaining < 0
+                      ? `${money(Math.abs(category.remaining))} over`
+                      : `${money(category.remaining)} left`}
+                  </p>
+                  <p className="text-sm text-black/50">
+                    {category.percentUsed.toFixed(1)}% used
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 h-4 rounded-full bg-black/10 overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${
+                    category.percentUsed >= 100
+                      ? "bg-red-500"
+                      : category.percentUsed >= 75
+                      ? "bg-yellow-500"
+                      : "bg-emerald-500"
+                  }`}
+                  style={{ width: `${Math.min(100, category.percentUsed)}%` }}
+                />
+              </div>
+            </div>
+          ))}
+
+          {categoryChartData.length === 0 && (
+            <p className="text-black/50">No category budgets or spending yet.</p>
+          )}
+        </div>
+      </Panel>
 
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Panel title="Quick Add Transaction">
@@ -411,13 +630,7 @@ export default async function DashboardPage() {
               <option value="INCOME">Income</option>
             </select>
 
-            <input
-              name="amount"
-              type="number"
-              step="0.01"
-              placeholder="Amount"
-              className={inputClass}
-            />
+            <input name="amount" type="number" step="0.01" placeholder="Amount" className={inputClass} />
 
             <select name="categoryId" className={inputClass}>
               <option value="">Select category</option>
@@ -429,18 +642,8 @@ export default async function DashboardPage() {
             </select>
 
             <input name="merchant" placeholder="Merchant" className={inputClass} />
-            <input
-              name="description"
-              placeholder="Description"
-              className={inputClass}
-            />
-
-            <input
-              name="date"
-              type="date"
-              defaultValue={inputDate(now)}
-              className={inputClass}
-            />
+            <input name="description" placeholder="Description" className={inputClass} />
+            <input name="date" type="date" defaultValue={inputDate(now)} className={inputClass} />
 
             <button className={buttonClass}>Add Transaction</button>
           </form>
@@ -449,13 +652,7 @@ export default async function DashboardPage() {
         <Panel title="Forecast Engine">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Card title="Weekly Budget" value={money(weeklyBudget)} tone="light" />
-
-            <Card
-              title="Projected Spend"
-              value={money(projectedWeeklySpend)}
-              tone="light"
-            />
-
+            <Card title="Projected Spend" value={money(projectedWeeklySpend)} tone="light" />
             <Card
               title="Forecast"
               value={
@@ -481,57 +678,23 @@ export default async function DashboardPage() {
         </Panel>
       </section>
 
-      <Panel title="AI Cash Flow Commander">
-        <div className="rounded-3xl bg-black text-white p-6 border border-emerald-500/30">
-          <div className="flex items-center justify-between gap-4 mb-5">
-            <div>
-              <p className="text-xs tracking-[0.35em] text-emerald-400 font-black uppercase">
-                OpenAI Spending Control
-              </p>
-              <h3 className="text-2xl font-black mt-2">
-                Compulsive Spending Guardrail
-              </h3>
-            </div>
-
-            <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 text-right">
-              <p className="text-xs text-white/50 font-bold uppercase">Limit</p>
-              <p className="text-2xl font-black">{money(safeDailySpend)}</p>
-            </div>
-          </div>
-
-          <div className="whitespace-pre-line text-white/80 leading-7 font-medium">
-            {aiInsight}
-          </div>
-        </div>
-      </Panel>
-
       <Panel title="Recent Transactions">
         <div className="space-y-3">
           {transactions.map((transaction) => (
-            <div
-              key={transaction.id}
-              className="flex justify-between items-center rounded-2xl bg-black/5 p-4"
-            >
+            <div key={transaction.id} className="flex justify-between items-center rounded-2xl bg-black/5 p-4">
               <div>
                 <p className="font-black">
                   {transaction.merchant ||
                     transaction.description ||
                     transaction.category.name}
                 </p>
-
                 <p className="text-sm text-black/50">
                   {auDate(transaction.date)} • {transaction.category.name}
                 </p>
               </div>
 
               <div className="flex items-center gap-4">
-                <p
-                  className={`text-xl font-black ${
-                    transaction.type === "INCOME"
-                      ? "text-emerald-600"
-                      : "text-red-600"
-                  }`}
-                >
+                <p className={`text-xl font-black ${transaction.type === "INCOME" ? "text-emerald-600" : "text-red-600"}`}>
                   {transaction.type === "INCOME" ? "+" : "-"}
                   {money(transaction.amount)}
                 </p>
@@ -584,28 +747,17 @@ export default async function DashboardPage() {
               );
             })}
 
-            {goals.length === 0 && (
-              <p className="text-black/50">No goals yet.</p>
-            )}
+            {goals.length === 0 && <p className="text-black/50">No goals yet.</p>}
           </div>
         </Panel>
 
         <Panel title="Spending Protection Rules">
           <div className="space-y-3 text-black/70">
-            <p>
-              <b>Rule 1:</b> No impulse purchase without waiting 24 hours.
-            </p>
-            <p>
-              <b>Rule 2:</b> Anything above {money(safeDailySpend)} must wait
-              until tomorrow.
-            </p>
-            <p>
-              <b>Rule 3:</b> If it is not food, fuel, rent, bills, or business
-              growth, it is optional.
-            </p>
-            <p>
-              <b>Rule 4:</b> Log every purchase before you buy it, not after.
-            </p>
+            <p><b>Rule 1:</b> No impulse purchase without waiting 24 hours.</p>
+            <p><b>Rule 2:</b> Anything above {money(impulseLockAmount)} gets delayed.</p>
+            <p><b>Rule 3:</b> Anything above {money(safeDailySpend)} must wait until tomorrow.</p>
+            <p><b>Rule 4:</b> If it is not food, fuel, rent, bills, or business growth, it is optional.</p>
+            <p><b>Rule 5:</b> Log every purchase before you buy it.</p>
           </div>
         </Panel>
       </section>
