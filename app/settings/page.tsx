@@ -1,0 +1,2 @@
+import { Panel, Shell } from "@/components/ui";
+export default function SettingsPage(){return <Shell title="Settings" subtitle="Finance week starts Thursday and ends Wednesday."><Panel title="Defaults"><div className="space-y-3 text-black/70"><p><b>Currency:</b> AUD</p><p><b>Finance week:</b> Thursday to Wednesday</p><p><b>Monthly income estimate:</b> forecast weekly income × 4.33</p></div></Panel></Shell>}

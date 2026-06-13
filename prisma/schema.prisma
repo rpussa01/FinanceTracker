@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+}
+
+enum GoalStatus {
+  ACTIVE
+  COMPLETED
+  PAUSED
+}
+
+enum SubscriptionFrequency {
+  WEEKLY
+  FORTNIGHTLY
+  MONTHLY
+  YEARLY
+}
+
+model Category {
+  id           String        @id @default(cuid())
+  name         String        @unique
+  monthlyLimit Float         @default(0)
+  weeklyLimit  Float         @default(0)
+  transactions Transaction[]
+  budgets      Budget[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model Transaction {
+  id          String          @id @default(cuid())
+  type        TransactionType @default(EXPENSE)
+  amount      Float
+  merchant    String?
+  description String?
+  date        DateTime
+  categoryId  String
+  category    Category        @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+model Budget {
+  id           String   @id @default(cuid())
+  name         String
+  weeklyLimit  Float    @default(0)
+  monthlyLimit Float    @default(0)
+  categoryId   String?
+  category     Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Goal {
+  id            String     @id @default(cuid())
+  name          String
+  targetAmount  Float
+  currentAmount Float      @default(0)
+  targetDate    DateTime?
+  status        GoalStatus @default(ACTIVE)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+}
+
+model Subscription {
+  id              String                @id @default(cuid())
+  name            String
+  amount          Float
+  frequency       SubscriptionFrequency @default(MONTHLY)
+  nextPaymentDate DateTime
+  active          Boolean               @default(true)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+}
+
+model IncomeForecast {
+  id           String   @id
+  weeklyAmount Float
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model IncomeLog {
+  id        String   @id @default(cuid())
+  amount    Float
+  source    String
+  date      DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
