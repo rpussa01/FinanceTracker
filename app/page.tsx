@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+import OpenAI from "openai";
 import { revalidatePath } from "next/cache";
 import { prisma } from "./lib/prisma";
 import {
@@ -8,11 +9,11 @@ import {
   daysPassedInFinanceWeek,
   daysRemainingInFinanceWeek,
   endOfFinanceWeek,
-  endOfMonth,
   inputDate,
   money,
   startOfFinanceWeek,
   startOfMonth,
+  endOfMonth,
 } from "./lib/finance";
 import { buttonClass, Card, inputClass, Panel, Shell } from "@/components/ui";
 
@@ -43,14 +44,118 @@ async function deleteTransaction(formData: FormData) {
   "use server";
 
   const id = String(formData.get("id") || "");
+  if (!id) return;
 
-  if (id) {
-    await prisma.transaction.delete({
-      where: { id },
-    });
-  }
+  await prisma.transaction.delete({
+    where: { id },
+  });
 
   revalidatePath("/");
+}
+
+async function generateCashFlowInsight(data: {
+  healthScore: number;
+  forecastWeeklyIncome: number;
+  actualWeeklyIncome: number;
+  weeklyExpenses: number;
+  monthlyExpenses: number;
+  weeklyBalance: number;
+  weeklyBudget: number;
+  projectedWeeklySpend: number;
+  forecastOver: number;
+  freeCashAfterBills: number;
+  safeDailySpend: number;
+  dueNext7: number;
+  dueNext30: number;
+  fixedMonthlyBurn: number;
+}) {
+  if (!process.env.OPENAI_API_KEY) {
+    return `OpenAI is not connected yet.
+
+Add OPENAI_API_KEY to your .env file.
+
+Until then:
+Your safe daily spend is ${money(data.safeDailySpend)}.
+Your free cash after bills is ${money(data.freeCashAfterBills)}.
+Do not spend emotionally today. Wait 24 hours before buying anything non-essential.`;
+  }
+
+  try {
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-5.5-mini",
+      input: `
+You are the AI Cash Flow Commander inside a finance app.
+
+The user says they are a bit of a compulsive spender.
+Your job is to protect them from emotional spending and help them make calm money decisions.
+
+Important:
+- Do not diagnose.
+- Do not shame.
+- Be direct, firm, practical, and supportive.
+- Use Australian dollars.
+- Give exact actions for today.
+- Keep it short but powerful.
+- Speak like a premium finance coach.
+- Focus on spending control, bills, cashflow, risk, and today's limit.
+
+Data:
+Health score: ${data.healthScore}/100
+Forecast weekly income: $${data.forecastWeeklyIncome.toFixed(2)}
+Actual weekly income: $${data.actualWeeklyIncome.toFixed(2)}
+Weekly expenses: $${data.weeklyExpenses.toFixed(2)}
+Monthly expenses: $${data.monthlyExpenses.toFixed(2)}
+Weekly balance: $${data.weeklyBalance.toFixed(2)}
+Weekly budget: $${data.weeklyBudget.toFixed(2)}
+Projected weekly spend: $${data.projectedWeeklySpend.toFixed(2)}
+Forecast over/under budget: $${data.forecastOver.toFixed(2)}
+Free cash after bills: $${data.freeCashAfterBills.toFixed(2)}
+Safe daily spend: $${data.safeDailySpend.toFixed(2)}
+Due next 7 days: $${data.dueNext7.toFixed(2)}
+Due next 30 days: $${data.dueNext30.toFixed(2)}
+Fixed monthly burn: $${data.fixedMonthlyBurn.toFixed(2)}
+
+Return exactly this format:
+
+COMMAND STATUS:
+...
+
+SPENDING RISK:
+...
+
+TODAY'S RULE:
+...
+
+DO NOT BUY LIST:
+...
+
+MONEY MOVE NOW:
+...
+
+FINAL WARNING:
+...
+`,
+    });
+
+    return response.output_text || "AI insight could not be generated.";
+  } catch (error) {
+    console.error(error);
+
+    return `AI insight temporarily unavailable.
+
+Check:
+1. OPENAI_API_KEY exists in .env
+2. You restarted npm run dev
+3. Your OpenAI account has API credit
+
+For now: keep today's non-essential spending under ${money(
+      data.safeDailySpend
+    )} and use a 24-hour delay before buying anything emotional.`;
+  }
 }
 
 export default async function DashboardPage() {
@@ -72,9 +177,7 @@ export default async function DashboardPage() {
     budgets,
     goals,
   ] = await Promise.all([
-    prisma.category.findMany({
-      orderBy: { name: "asc" },
-    }),
+    prisma.category.findMany({ orderBy: { name: "asc" } }),
 
     prisma.transaction.findMany({
       include: { category: true },
@@ -127,7 +230,10 @@ export default async function DashboardPage() {
     }),
   ]);
 
-  const actualWeeklyIncome = incomeLogs.reduce((sum, log) => sum + log.amount, 0);
+  const actualWeeklyIncome = incomeLogs.reduce(
+    (sum, log) => sum + log.amount,
+    0
+  );
 
   const forecastWeeklyIncome =
     incomeForecast?.weeklyAmount && incomeForecast.weeklyAmount > 0
@@ -160,14 +266,16 @@ export default async function DashboardPage() {
   const dueNext7 = activeSubs
     .filter(
       (subscription) =>
-        subscription.nextPaymentDate >= now && subscription.nextPaymentDate <= next7
+        subscription.nextPaymentDate >= now &&
+        subscription.nextPaymentDate <= next7
     )
     .reduce((sum, subscription) => sum + subscription.amount, 0);
 
   const dueNext30 = activeSubs
     .filter(
       (subscription) =>
-        subscription.nextPaymentDate >= now && subscription.nextPaymentDate <= next30
+        subscription.nextPaymentDate >= now &&
+        subscription.nextPaymentDate <= next30
     )
     .reduce((sum, subscription) => sum + subscription.amount, 0);
 
@@ -176,10 +284,8 @@ export default async function DashboardPage() {
   const freeCashAfterBills =
     forecastMonthlyIncome - monthlyExpenses - fixedMonthlyBurn;
 
-  const incomeForSafeSpend = forecastWeeklyIncome || actualWeeklyIncome;
-
   const safeDailySpend =
-    Math.max(0, incomeForSafeSpend - weeklyExpenses - dueNext7) /
+    Math.max(0, forecastWeeklyIncome - weeklyExpenses - dueNext7) /
     Math.max(1, daysRemainingInFinanceWeek(now));
 
   const weeklyBudget =
@@ -206,6 +312,23 @@ export default async function DashboardPage() {
     )
   );
 
+  const aiInsight = await generateCashFlowInsight({
+    healthScore,
+    forecastWeeklyIncome,
+    actualWeeklyIncome,
+    weeklyExpenses,
+    monthlyExpenses,
+    weeklyBalance,
+    weeklyBudget,
+    projectedWeeklySpend,
+    forecastOver,
+    freeCashAfterBills,
+    safeDailySpend,
+    dueNext7,
+    dueNext30,
+    fixedMonthlyBurn,
+  });
+
   return (
     <Shell
       title="Finance Dashboard"
@@ -218,7 +341,13 @@ export default async function DashboardPage() {
           title="Health Score"
           value={`${healthScore}/100`}
           note="Cash-flow risk score"
-          tone={healthScore < 60 ? "danger" : healthScore < 80 ? "warning" : "success"}
+          tone={
+            healthScore < 60
+              ? "danger"
+              : healthScore < 80
+              ? "warning"
+              : "success"
+          }
         />
 
         <Card
@@ -248,7 +377,7 @@ export default async function DashboardPage() {
         <Card
           title="Safe Daily Spend"
           value={money(safeDailySpend)}
-          note="After weekly spend and 7-day bills"
+          note="Hard daily spending ceiling"
           tone={safeDailySpend <= 0 ? "danger" : "success"}
         />
 
@@ -300,7 +429,6 @@ export default async function DashboardPage() {
             </select>
 
             <input name="merchant" placeholder="Merchant" className={inputClass} />
-
             <input
               name="description"
               placeholder="Description"
@@ -352,6 +480,30 @@ export default async function DashboardPage() {
           </div>
         </Panel>
       </section>
+
+      <Panel title="AI Cash Flow Commander">
+        <div className="rounded-3xl bg-black text-white p-6 border border-emerald-500/30">
+          <div className="flex items-center justify-between gap-4 mb-5">
+            <div>
+              <p className="text-xs tracking-[0.35em] text-emerald-400 font-black uppercase">
+                OpenAI Spending Control
+              </p>
+              <h3 className="text-2xl font-black mt-2">
+                Compulsive Spending Guardrail
+              </h3>
+            </div>
+
+            <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 text-right">
+              <p className="text-xs text-white/50 font-bold uppercase">Limit</p>
+              <p className="text-2xl font-black">{money(safeDailySpend)}</p>
+            </div>
+          </div>
+
+          <div className="whitespace-pre-line text-white/80 leading-7 font-medium">
+            {aiInsight}
+          </div>
+        </div>
+      </Panel>
 
       <Panel title="Recent Transactions">
         <div className="space-y-3">
@@ -438,44 +590,22 @@ export default async function DashboardPage() {
           </div>
         </Panel>
 
-        <Panel title="AI Cash Flow Insights">
+        <Panel title="Spending Protection Rules">
           <div className="space-y-3 text-black/70">
             <p>
-              Your forecast weekly income is{" "}
-              <b>{money(forecastWeeklyIncome)}</b>.
+              <b>Rule 1:</b> No impulse purchase without waiting 24 hours.
             </p>
-
             <p>
-              Your actual weekly income is <b>{money(actualWeeklyIncome)}</b>.
+              <b>Rule 2:</b> Anything above {money(safeDailySpend)} must wait
+              until tomorrow.
             </p>
-
             <p>
-              Your fixed monthly burn is <b>{money(fixedMonthlyBurn)}</b>.
+              <b>Rule 3:</b> If it is not food, fuel, rent, bills, or business
+              growth, it is optional.
             </p>
-
             <p>
-              Your free cash after bills is{" "}
-              <b
-                className={
-                  freeCashAfterBills < 0 ? "text-red-600" : "text-emerald-600"
-                }
-              >
-                {money(freeCashAfterBills)}
-              </b>
-              .
+              <b>Rule 4:</b> Log every purchase before you buy it, not after.
             </p>
-
-            <p>
-              You can safely spend about <b>{money(safeDailySpend)}</b> per day
-              until the finance week resets.
-            </p>
-
-            {incomeForecast?.weeklyAmount ? null : (
-              <p className="text-orange-600 font-bold">
-                No forecast income is set, so this dashboard is using your
-                actual logged income for this week.
-              </p>
-            )}
           </div>
         </Panel>
       </section>
